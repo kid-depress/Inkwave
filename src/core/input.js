@@ -114,13 +114,19 @@ export class Input {
   pressCode(code) { this.keys.add(code); this.pressed.add(code); }
   releaseCode(code) { this.keys.delete(code); }
 
-  requestLock() {
-    if (this.touch.active || this._plock) return;   // touch has no pointer to lock
+  async requestLock() {
+    if (this.touch.active || this._plock || this._lockPending) return;
+    this._lockPending = true;
     try {
-      const p = this.canvas.requestPointerLock({ unadjustedMovement: true });
-      // some platforms reject unadjustedMovement: fall back to a plain request
-      if (p && p.catch) p.catch(() => { try { const q = this.canvas.requestPointerLock(); if (q && q.catch) q.catch(() => {}); } catch { /* ignore */ } });
-    } catch { /* not allowed without a gesture */ }
+      try {
+        await this.canvas.requestPointerLock({ unadjustedMovement: true });
+      } catch (error) {
+        // Unsupported raw movement can throw synchronously or reject its promise.
+        // Gesture/focus failures need another click, not another automatic request.
+        if (error?.name === 'NotSupportedError' || error instanceof TypeError) await this.canvas.requestPointerLock();
+      }
+    } catch { /* The capture prompt stays available for the next user gesture. */ }
+    finally { this._lockPending = false; }
   }
   exitLock() { if (document.pointerLockElement) document.exitPointerLock(); }
 

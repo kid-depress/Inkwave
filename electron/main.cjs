@@ -1,15 +1,25 @@
-// Electron shell for INKWAVE: serves the static game over a privileged app:// scheme
-// (ES modules + import maps don't load from file://) and opens it in a native window.
-const { app, BrowserWindow, Menu, protocol, net, shell, powerSaveBlocker, ipcMain, screen, nativeTheme } = require('electron');
+// Electron shell: bundled assets are served on loopback, with the native window isolated from Node.js.
+const { app, BrowserWindow, Menu, shell, powerSaveBlocker, ipcMain, screen, nativeTheme, dialog } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
-const { pathToFileURL } = require('node:url');
+const { startGameServer } = require('./local-server.cjs');
+const desktopConfig = require('./config.json');
 
 const ROOT = path.join(__dirname, '..');
+let gameHost = null;
+const smoke = process.argv.includes('--inkwave-smoke');
 
-// GPU: run WebGL through ANGLE's Metal backend (instead of the deprecated OpenGL one),
-// prefer the discrete GPU on dual-GPU Macs, and never fall back to software rendering.
-app.commandLine.appendSwitch('use-angle', 'metal');
+// Allow a separate, disposable profile when checking the packaged app.
+const profileArg = process.argv.find((arg) => arg.startsWith('--inkwave-user-data='));
+if (profileArg) app.setPath('userData', path.resolve(profileArg.slice('--inkwave-user-data='.length)));
+if (!app.requestSingleInstanceLock()) app.quit();
+app.on('second-instance', () => {
+  const win = BrowserWindow.getAllWindows()[0];
+  if (win) { if (win.isMinimized()) win.restore(); win.focus(); }
+});
+
+// Metal is macOS-specific; ANGLE chooses the native backend on Windows/Linux.
+if (process.platform === 'darwin') app.commandLine.appendSwitch('use-angle', 'metal');
 app.commandLine.appendSwitch('force_high_performance_gpu');
 app.commandLine.appendSwitch('ignore-gpu-blocklist');
 
@@ -20,13 +30,9 @@ const CSP = [
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
   "media-src 'self' data: blob:",
-  "connect-src 'self' data: blob:",
+  `connect-src 'self' data: blob: ${new URL(desktopConfig.relay).origin}`,
   "worker-src 'self' blob:",
 ].join('; ');
-
-protocol.registerSchemesAsPrivileged([
-  { scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
-]);
 
 // ---- window state (size + fullscreen), remembered between launches; first launch opens fullscreen
 const stateFile = () => path.join(app.getPath('userData'), 'window-state.json');
@@ -36,7 +42,7 @@ function loadState() {
 function saveState(win) {
   try {
     const s = { fullscreen: win.isFullScreen(), bounds: win.isFullScreen() ? loadState().bounds : win.getNormalBounds() };
-    fs.writeFileSync(stateFile(), JSON.stringify(s));
+    fs.writeFileSync(stateFile(), JSON.stringify({ ...s, port: gameHost?.port }));
   } catch { /* non-fatal */ }
 }
 function onScreen(b) {
@@ -51,14 +57,22 @@ function createWindow() {
     minWidth: 960,
     minHeight: 600,
     title: 'INKWAVE',
+    icon: path.join(ROOT, 'assets', 'icon.png'),
     backgroundColor: '#0d1020',
-    fullscreen: !!state.fullscreen,
+    fullscreen: smoke ? false : !!state.fullscreen,
+    show: !smoke,
     fullscreenable: true,
-    webPreferences: { contextIsolation: true, sandbox: true, preload: path.join(__dirname, 'preload.cjs') },
+    webPreferences: { contextIsolation: true, sandbox: true, backgroundThrottling: !smoke, preload: path.join(__dirname, 'preload.cjs') },
   });
-  win.loadURL('app://inkwave/index.html');
+  win.loadURL(`${gameHost.url}/index.html${smoke ? '?quality=low' : ''}`);
+  win.webContents.on('will-navigate', (event, url) => {
+    if (new URL(url).origin !== gameHost.url) event.preventDefault();
+  });
   // Keep any outbound links in the user's browser instead of inside the game window.
-  win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
 
   // Fullscreen. macOS ignores requests made mid-transition, so remember the wanted state and re-apply it once the
   // animation ends. Shortcuts are caught before the page sees them, so the game's key handling / pointer lock can't eat them.
@@ -99,23 +113,6 @@ function createWindow() {
   return win;
 }
 
-const MIME = { '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.ogg': 'audio/ogg', '.opus': 'audio/ogg', '.wav': 'audio/wav', '.flac': 'audio/flac' };
-async function rangeResponse(file, header) {
-  let size;
-  try { ({ size } = await fs.promises.stat(file)); } catch { return new Response('Not found', { status: 404 }); }
-  const [, a, b] = /bytes=(\d*)-(\d*)/.exec(header);
-  let start = a === '' ? Math.max(0, size - Number(b)) : Number(a);
-  let end = a !== '' && b !== '' ? Math.min(Number(b), size - 1) : size - 1;
-  if (start >= size || start > end) return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${size}` } });
-  const buf = Buffer.alloc(end - start + 1);
-  const fh = await fs.promises.open(file, 'r');
-  try { await fh.read(buf, 0, buf.length, start); } finally { await fh.close(); }
-  return new Response(buf, { status: 206, headers: {
-    'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream',
-    'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': String(buf.length), 'Accept-Ranges': 'bytes',
-  } });
-}
-
 function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { role: 'appMenu' },
@@ -133,27 +130,20 @@ function buildMenu() {
   ]));
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   nativeTheme.themeSource = 'dark';
-  protocol.handle('app', async (req) => {
-    const { pathname } = new URL(req.url);
-    let file = path.normalize(path.join(ROOT, decodeURIComponent(pathname)));
-    if (!file.startsWith(ROOT)) return new Response('Forbidden', { status: 403 });
-    // songs ship outside the asar archive (see package.json asar.unpackDir) so media can seek in them
-    file = file.replace(`app.asar${path.sep}songs${path.sep}`, `app.asar.unpacked${path.sep}songs${path.sep}`);
-    // <audio> streams with byte-range requests: answer them with 206 partial content, or later loads of a song fail
-    const range = req.headers.get('range');
-    if (range && /^bytes=\d*-\d*$/.test(range)) return rangeResponse(file, range);
-    const res = await net.fetch(pathToFileURL(file).toString());
-    if (!file.endsWith('.html')) return res;
-    // everything the game loads ships inside the app; nothing remote may run in the window
-    const headers = new Headers(res.headers);
-    headers.set('Content-Security-Policy', CSP);
-    return new Response(res.body, { status: res.status, headers });
-  });
+  gameHost = await startGameServer({ root: ROOT, port: loadState().port || 18490, csp: CSP });
+  // Reuse the same origin on later launches so settings, progression and language persist.
+  fs.writeFileSync(stateFile(), JSON.stringify({ ...loadState(), port: gameHost.port }));
+  ipcMain.on('desktop:get-config', (event) => { event.returnValue = desktopConfig; });
   buildMenu();
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+}).catch((error) => {
+  console.error('[desktop]', error);
+  if (!smoke) dialog.showErrorBox('INKWAVE 启动失败', error.message);
+  app.exit(1);
 });
 
 app.on('window-all-closed', () => app.quit());
+app.on('before-quit', () => { gameHost?.server.close(); gameHost?.server.closeIdleConnections(); });

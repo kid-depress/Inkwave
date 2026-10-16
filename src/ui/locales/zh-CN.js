@@ -1,5 +1,7 @@
 // English copy is the fallback key. Keep interpolation parameters (names, room codes, numbers) out of the catalog.
 export const ZH_CN = {
+  'Click to aim': '点击进入瞄准',
+  'Click here to capture the mouse. Press Esc to open the menu.': '点击此处启用鼠标瞄准，按 Esc 打开菜单。',
   'Language / 语言': '语言 / Language',
   'Choose the interface language. Applies instantly and saves automatically.': '选择界面语言，立即生效并自动保存。',
   'Language, shake, vibration, colour-safe inks, minimap and match defaults.': '语言、震动、色盲友好墨水、小地图及默认对战设置。',

@@ -4,6 +4,7 @@ import { G, on, emit, clamp, damp } from './core/ctx.js';
 import { normalizeLanguage, setLanguage } from './ui/i18n.js';
 import { Renderer } from './core/renderer.js';
 import { Input } from './core/input.js';
+import { PointerCapture } from './ui/pointer-capture.js';
 import { TouchControls, shouldUseTouch, isTouchDevice } from './core/touch.js';
 import { mapTheme,
   DEFAULT_SETTINGS, QUALITY, TEAM_PALETTES, COLORBLIND_PALETTE, TEAM_NAMES, WEAPONS, WEAPON_ORDER, WEAPON_SUCCESSOR, ZONES, SUB, SUBS, SUB_ORDER, SPECIALS, SPECIAL_ORDER,
@@ -72,7 +73,8 @@ class Game {
     const t0 = performance.now();
     // real top-down thumbnails for the stage cards, generated from each layout's geometry
     for (const m of MAPS) { try { m.thumb = layoutThumbSVG(MAP_LAYOUTS[m.layout || m.id], m.theme); } catch (e) { console.warn('thumb', m.id, e); } }
-    this.settings = G.settings = loadJSON('inkwave.settings', DEFAULT_SETTINGS);
+    this.settings = G.settings = loadJSON('inkwave.settings', { ...DEFAULT_SETTINGS,
+      language: window.inkwaveNative?.language || DEFAULT_SETTINGS.language });
     this.settings.language = setLanguage(this.settings.language);
     // The RAW stored blob, read before anything below can save the merged defaults back. The fov migration two lines
     // down persists the whole object, so afterwards "the player never chose a value" and "we just wrote the default"
@@ -211,10 +213,11 @@ class Game {
       };
       document.addEventListener('visibilitychange', this._onHide);
     }
-    // after a focus steal while the map was held, the next click on the game takes the mouse back (no pause detour)
-    this.R.renderer.domElement.addEventListener('mousedown', () => {
-      if (this._relock && G.mode === 'match' && this.match && !this.match.paused && !this.menus?.current) { this._relock = false; this.input.requestLock(); }
-    });
+    this.pointerCapture = new PointerCapture(this.input, this.uiRoot, () =>
+      G.mode === 'match' && !!this.match?.controller && !this.match.attract &&
+      !this.match.paused && !this.menus?.current &&
+      (this.match.state === 'intro' || this.match.state === 'playing') &&
+      !this.match.controller.mapHeld && !(this.rig?.mapK > 0));
 
     // modules built by other authors
     const [charMod, fxMod, envMod, audioMod, musicMod] = await Promise.all([
@@ -589,7 +592,7 @@ class Game {
   _onPointerUnlock() {
     // only a live round pauses on focus loss; intro / time's up / judge / results release the mouse on purpose.
     // Holding the map is never a reason to pause (some browsers/embeds steal focus on TAB): relock on the next click.
-    if (this.match?.controller?.mapHeld || (this.rig?.mapK ?? 0) > 0) { this._relock = true; return; }
+    if (this.match?.controller?.mapHeld || (this.rig?.mapK ?? 0) > 0) return;
     if (G.mode === 'match' && this.match && !this.match.paused && this.match.state === 'playing' && !this.menus?.current) this.pause();
   }
   // pull the fog back while the view is overhead (the stage is ~150 m away up there), restore it exactly after
@@ -1255,6 +1258,7 @@ class Game {
     G.renderer.info.reset();
     G.time += dt;
     this.input.pollPad();
+    this.pointerCapture?.update();
     this.input.pollTouch();
     this.touch?.update();          // gate the on-screen controls on "in a match, no menu open"
     this._padMenus();

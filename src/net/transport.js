@@ -10,6 +10,7 @@ export const PROD_RELAY = 'wss://inkwave-net.inkwave.workers.dev';
 export function relayURL() {
   const q = new URLSearchParams(location.search).get('relay');
   if (q) return q.replace(/\/$/, '');
+  if (globalThis.inkwaveNative?.relay) return globalThis.inkwaveNative.relay.replace(/\/$/, '');
   const h = location.hostname;
   const local = h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || /^(10|192\.168|172\.(1[6-9]|2\d|3[01]))\./.test(h) || h.endsWith('.local');
   return local ? `ws://${h}:8787` : PROD_RELAY;

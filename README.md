@@ -92,10 +92,19 @@ cd inkwave
 npm install      # Electron + the headless tools
 npm start        # the desktop app (Electron)
 npm run serve    # or the web version: http://localhost:8490
-npm run package  # build the macOS app into dist/ (arm64 + x64)
+npm run package      # build a desktop app for this OS/architecture into dist/
+npm run package:win  # Windows x64 folder + shareable ZIP (build on Windows)
+npm run package:mac  # macOS arm64 + x64 apps
 ```
 
 Optional: drop your own music into `songs/` (see [`songs/README.md`](songs/README.md)); otherwise the procedural soundtrack plays.
+
+The desktop build starts in Simplified Chinese and connects to the relay configured in `electron/config.json`.
+On Windows, fully extract `dist/INKWAVE-1.1.0-Windows-x64.zip` and run `INKWAVE.exe`; keep its supporting files alongside it.
+It includes the runtime, so players do not need Node.js, Python or a separate local relay. The desktop shell serves
+its bundled files on loopback, retaining settings on a stable local origin and allowing the relay's existing local-client policy.
+Run `npm run test-desktop-server` for static-server checks, and `npm run test-desktop -- --network` after packaging
+to check the actual binary and a temporary two-client connection to the configured public relay.
 
 Useful URL parameters: `?map=halyard&time=dusk` picks a stage, `&autostart=180` skips the menus into a 180 s match, `&autopilot` lets a bot drive you.
 
